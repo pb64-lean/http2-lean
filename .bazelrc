@@ -1,0 +1,7 @@
+try-import %workspace%/.bazelrc.user
+try-import %workspace%/.bazelrc.local
+
+common --enable_bzlmod
+common --lockfile_mode=error
+
+test --test_output=errors

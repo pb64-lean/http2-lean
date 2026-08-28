@@ -1,0 +1,80 @@
+"""Public Lean import root."""
+
+load("@rules_lean//lean:defs.bzl", "lean_library")
+
+package(default_visibility = ["//visibility:public"])
+
+lean_library(
+    name = "http2",
+    srcs = [
+        "Http2.lean",
+        "Http2/Bytes.lean",
+        "Http2/Connection.lean",
+        "Http2/Error.lean",
+        "Http2/ExtendedConnect.lean",
+        "Http2/Frame.lean",
+        "Http2/Header.lean",
+        "Http2/Hpack.lean",
+    ],
+    strip_module_prefix = "lean",
+)
+
+lean_library(
+    name = "cancellation_token",
+    srcs = ["Http2/CancellationToken.lean"],
+    strip_module_prefix = "lean",
+)
+
+lean_library(
+    name = "dns",
+    srcs = ["Http2/Dns.lean"],
+    strip_module_prefix = "lean",
+)
+
+lean_library(
+    name = "name_resolver",
+    srcs = ["Http2/NameResolver.lean"],
+    strip_module_prefix = "lean",
+    deps = [":dns"],
+)
+
+lean_library(
+    name = "posix",
+    srcs = ["Http2/Posix.lean"],
+    strip_module_prefix = "lean",
+    deps = ["//native:posix_ffi"],
+)
+
+lean_library(
+    name = "tls_session",
+    srcs = ["Http2/Tls/Session.lean"],
+    strip_module_prefix = "lean",
+    deps = [
+        ":cancellation_token",
+        "@tls13_lean//Tls:tls",
+    ],
+)
+
+lean_library(
+    name = "trust_anchors",
+    srcs = ["Http2/TrustAnchors.lean"],
+    strip_module_prefix = "lean",
+    deps = [
+        ":posix",
+        "@tls13_lean//TLS13:tls13",
+    ],
+)
+
+lean_library(
+    name = "runtime",
+    srcs = ["Http2/Runtime.lean"],
+    strip_module_prefix = "lean",
+    deps = [
+        ":cancellation_token",
+        ":dns",
+        ":name_resolver",
+        ":posix",
+        ":tls_session",
+        ":trust_anchors",
+    ],
+)

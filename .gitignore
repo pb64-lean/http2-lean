@@ -1,0 +1,9 @@
+/bazel-*
+/integration/downstream/bazel-*
+.lake/
+.bazelbsp/
+.bazelrc.user
+.bazelrc.local
+.DS_Store
+/result
+/result-*

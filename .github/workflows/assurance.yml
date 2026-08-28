@@ -1,0 +1,17 @@
+name: assurance
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: assurance-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  scan:
+    uses: pb64-lean/.github/.github/workflows/assurance.yml@main

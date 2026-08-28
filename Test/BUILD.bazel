@@ -1,0 +1,59 @@
+load("@rules_lean//lean:defs.bzl", "lean_test")
+
+package(default_visibility = ["//visibility:private"])
+
+lean_test(
+    name = "connection_test",
+    size = "small",
+    srcs = ["ConnectionTest.lean"],
+    deps = ["//lean:http2"],
+)
+
+lean_test(
+    name = "extended_connect_codec_test",
+    size = "small",
+    srcs = ["ExtendedConnectCodecTest.lean"],
+    deps = ["//lean:http2"],
+)
+
+lean_test(
+    name = "error_classification_test",
+    size = "small",
+    srcs = ["ErrorClassificationTest.lean"],
+    deps = ["//lean:http2"],
+)
+
+lean_test(
+    name = "frame_header_decode_test",
+    size = "small",
+    srcs = ["FrameHeaderDecodeTest.lean"],
+    deps = ["//lean:http2"],
+)
+
+lean_test(
+    name = "frame_parser_cursor_test",
+    size = "small",
+    srcs = ["FrameParserCursorTest.lean"],
+    deps = ["//lean:http2"],
+)
+
+lean_test(
+    name = "hpack_name_lookup_test",
+    size = "small",
+    srcs = ["HpackNameLookupTest.lean"],
+    deps = ["//lean:http2"],
+)
+
+lean_test(
+    name = "hpack_test",
+    size = "small",
+    srcs = ["HpackTest.lean"],
+    deps = ["//lean:http2"],
+)
+
+lean_test(
+    name = "runtime_support_test",
+    size = "small",
+    srcs = ["RuntimeSupportTest.lean"],
+    deps = ["//lean:runtime"],
+)

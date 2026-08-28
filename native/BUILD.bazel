@@ -1,0 +1,45 @@
+package(default_visibility = ["//visibility:public"])
+
+load("@rules_cc//cc:defs.bzl", "cc_library")
+load(
+    "@rules_lean//lean:defs.bzl",
+    "lean_generated_c_file",
+    "lean_runtime_headers",
+)
+
+lean_runtime_headers(
+    name = "lean_runtime_headers",
+)
+
+cc_library(
+    name = "posix_ffi",
+    srcs = ["http2_posix.c"],
+    hdrs = ["http2_posix.h"],
+    copts = [
+        "-std=c17",
+        "-Wall",
+        "-Werror",
+        "-Wextra",
+        "-Wmissing-prototypes",
+    ],
+    deps = [":lean_runtime_headers"],
+)
+
+lean_generated_c_file(
+    name = "posix_generated_c",
+    dep = "//lean:posix",
+    module_suffix = "/Http2/Posix.c",
+)
+
+cc_library(
+    name = "posix_extern_abi_compile",
+    srcs = [":posix_generated_c"],
+    additional_compiler_inputs = ["http2_posix.h"],
+    copts = [
+        "-include",
+        "$(location http2_posix.h)",
+        "-Werror",
+        "-Wno-unused-variable",
+    ],
+    deps = [":lean_runtime_headers"],
+)

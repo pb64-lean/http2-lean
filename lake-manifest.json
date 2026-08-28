@@ -1,0 +1,16 @@
+{"version": "1.2.0",
+ "packagesDir": ".lake/packages",
+ "packages":
+ [{"url": "https://github.com/pb64-lean/tls13-lean.git",
+   "type": "git",
+   "subDir": null,
+   "scope": "",
+   "rev": "4fa14fe068d9ea17c85294a6a27c224b2de5cddb",
+   "name": "«tls13-lean»",
+   "manifestFile": "lake-manifest.json",
+   "inputRev": "4fa14fe068d9ea17c85294a6a27c224b2de5cddb",
+   "inherited": false,
+   "configFile": "lakefile.lean"}],
+ "name": "«http2-lean»",
+ "lakeDir": ".lake",
+ "fixedToolchain": false}

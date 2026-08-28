@@ -1,0 +1,25 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    - cron: "23 5 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    uses: pb64-lean/.github/.github/workflows/bazel-ci.yml@main
+
+  downstream:
+    uses: pb64-lean/.github/.github/workflows/integration.yml@main
+    with:
+      run: cd integration/downstream && bazel test //... --lockfile_mode=error --test_output=errors --color=yes --curses=no
+      timeout_minutes: 120

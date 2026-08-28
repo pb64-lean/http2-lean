@@ -1,0 +1,48 @@
+"""Bazel module definition for the Lean HTTP/2 foundation."""
+
+module(
+    name = "http2-lean",
+    version = "0.1.0",
+    compatibility_level = 1,
+    bazel_compatibility = [">=8.0.0"],
+)
+
+bazel_dep(name = "rules_lean", version = "0.1.0")
+archive_override(
+    module_name = "rules_lean",
+    integrity = "sha256-tPQDP5DWBNcwtCbZVLPkNqeFjKjWzJulx05ScxooN6M=",
+    strip_prefix = "rules_lean-ac0ad9a76428a9aa05f885a53bab6eb302682649",
+    urls = [
+        "https://github.com/pb64-lean/rules_lean/archive/ac0ad9a76428a9aa05f885a53bab6eb302682649.tar.gz",
+    ],
+)
+
+bazel_dep(name = "rules_cc", version = "0.2.17")
+
+bazel_dep(name = "tls13-lean", version = "0.1.0", repo_name = "tls13_lean")
+archive_override(
+    module_name = "tls13-lean",
+    integrity = "sha256-wInyKUe/AxXRSO2YaKwpqgbBU/ek9UG+eYPAeGvpe6c=",
+    strip_prefix = "tls13-lean-4fa14fe068d9ea17c85294a6a27c224b2de5cddb",
+    urls = [
+        "https://github.com/pb64-lean/tls13-lean/archive/4fa14fe068d9ea17c85294a6a27c224b2de5cddb.tar.gz",
+    ],
+)
+
+lean = use_extension(
+    "@rules_lean//lean:extensions.bzl",
+    "lean",
+    dev_dependency = True,
+)
+lean.nix_toolchain(
+    name = "lean4",
+    attr = "lean4_upstream_std",
+    nix_file = "@rules_lean//:nixpkgs.nix",
+    nix_file_deps = ["@rules_lean//:nixpkgs.json"],
+)
+use_repo(lean, "lean4_toolchain")
+
+register_toolchains(
+    "@lean4_toolchain//:all",
+    dev_dependency = True,
+)

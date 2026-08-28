@@ -1,0 +1,50 @@
+"""Public entry point and repository metadata."""
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files([
+    "CHANGELOG.md",
+    "CODE_OF_CONDUCT.md",
+    "CONTRIBUTING.md",
+    "LICENSE",
+    "MODULE.bazel",
+    "MODULE.bazel.lock",
+    "README.md",
+    "SECURITY.md",
+    "lean-toolchain",
+])
+
+alias(
+    name = "http2",
+    actual = "//lean:http2",
+)
+
+alias(
+    name = "runtime",
+    actual = "//lean:runtime",
+)
+
+alias(
+    name = "cancellation_token",
+    actual = "//lean:cancellation_token",
+)
+
+alias(
+    name = "name_resolver",
+    actual = "//lean:name_resolver",
+)
+
+alias(
+    name = "tls_session",
+    actual = "//lean:tls_session",
+)
+
+alias(
+    name = "trust_anchors",
+    actual = "//lean:trust_anchors",
+)
+
+alias(
+    name = "posix",
+    actual = "//lean:posix",
+)

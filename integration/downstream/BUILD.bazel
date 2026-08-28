@@ -1,0 +1,19 @@
+"""Dependency-mode smoke test for the public import root."""
+
+load("@rules_lean//lean:defs.bzl", "lean_test")
+
+package(default_visibility = ["//visibility:private"])
+
+lean_test(
+    name = "public_api_test",
+    size = "small",
+    srcs = ["PublicApiTest.lean"],
+    deps = ["@http2_lean//:http2"],
+)
+
+lean_test(
+    name = "runtime_api_test",
+    size = "small",
+    srcs = ["RuntimeApiTest.lean"],
+    deps = ["@http2_lean//:runtime"],
+)
