@@ -1,0 +1,10 @@
+load("@rules_lean//lean:defs.bzl", "lean_binary")
+
+package(default_visibility = ["//visibility:private"])
+
+lean_binary(
+    name = "hpack_smoke_server",
+    srcs = ["HpackSmokeServer.lean"],
+    tags = ["manual"],
+    deps = ["//:http2"],
+)

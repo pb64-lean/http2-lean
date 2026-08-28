@@ -23,6 +23,13 @@ private def testResolution : IO Unit := do
       addresses[1]!.numericHost == "::1" do
     fail "address order or canonical form changed"
 
+  let literal := Http2.NameResolver.Address.ofIP
+    (.v4 (Std.Net.IPv4Addr.ofParts 192 0 2 1)) 8443
+  unless literal.numericHost == "192.0.2.1" &&
+      literal.authority == "192.0.2.1:8443" &&
+      literal.family == .ipv4 do
+    fail "a parsed literal IP did not retain its canonical endpoint"
+
 private def testTrustBoundary : IO Unit := do
   match Http2.TrustAnchors.validateBundle ByteArray.empty with
   | .error .empty => pure ()

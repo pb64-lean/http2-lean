@@ -203,7 +203,6 @@ def testStringDecoderDifferential : IO Unit := do
     (bytes [0xff], 0, "truncated HPACK integer"),
     (bytes [0x02, 0x61], 0, "truncated HPACK string"),
     (bytes [0x82, 0x1f], 0, "truncated HPACK string"),
-    (bytes [0x01, 0xff], 0, "HPACK string is not valid UTF-8"),
     (bytes [0x81, 0x18], 0, "invalid HPACK Huffman padding"),
     (bytes [0x84, 0xff, 0xff, 0xff, 0xfc], 0, "HPACK Huffman EOS appeared in data")
   ]
@@ -286,7 +285,7 @@ def testEncoderDecoderTablesStayInSync : IO Unit := do
 def testEviction : IO Unit := do
   -- max size that fits roughly one small entry (name+value+32)
   let encoder := Http2.Hpack.setMaxAllowedSize {} 70
-  let decoder := Http2.Hpack.setMaxAllowedSize {} 70
+  let decoder := Http2.Hpack.setDecoderMaxAllowedSize {} 70
   let blocks := [
     #[Header.of "header-aa" "value-aa"],
     #[Header.of "header-bb" "value-bb"],
@@ -323,7 +322,7 @@ def testDynamicTableSizeUpdateEmitted : IO Unit := do
 
   let decoder : Http2.Hpack.State := {}
   let firstDecoded ← expectErrorOk (Http2.Hpack.decodeHeaderBlock decoder first.1)
-  let decoderResized := Http2.Hpack.setMaxAllowedSize firstDecoded.state 128
+  let decoderResized := Http2.Hpack.setDecoderMaxAllowedSize firstDecoded.state 128
   let secondDecoded ← expectErrorOk (Http2.Hpack.decodeHeaderBlock decoderResized second.1)
   expectEq secondDecoded.headers secondHeaders
     "block with leading size update should decode"
@@ -331,6 +330,131 @@ def testDynamicTableSizeUpdateEmitted : IO Unit := do
     "decoder should apply the emitted dynamic table size update"
   expectEq secondDecoded.state.dynamic second.2.dynamic
     "tables should stay in sync across a size update"
+
+def testIntegerImplementationBound : IO Unit := do
+  let maximum : Nat := 18446744073709551615
+  let encoded ← expectErrorOk (Http2.Hpack.encodeInteger 7 0 maximum)
+  let decoded ← expectErrorOk (Http2.Hpack.decodeInteger 7 encoded 0)
+  expectEq decoded.value maximum "maximum supported HPACK integer did not round trip"
+  let adversarial := bytes (0x7f :: (List.replicate 100 0x80 ++ [0]))
+  match Http2.Hpack.decodeInteger 7 adversarial 0 with
+  | .error error =>
+      expectEq error.code ErrorCode.compressionError
+        "oversized HPACK integer used the wrong error code"
+  | .ok _ => throw (IO.userError "an unbounded HPACK integer continuation was accepted")
+
+def testDynamicTableMinimumAndFinalUpdates : IO Unit := do
+  let seededHeaders := #[Header.of "x-seeded" "value"]
+  let seeded ← expectErrorOk
+    (Http2.Hpack.encodeHeaderBlock ({} : Http2.Hpack.State) seededHeaders)
+  let decodedSeed ← expectErrorOk
+    (Http2.Hpack.decodeHeaderBlock ({} : Http2.Hpack.State) seeded.1)
+  let changed := Http2.Hpack.setMaxAllowedSize
+    (Http2.Hpack.setMaxAllowedSize seeded.2 0) Http2.Hpack.defaultDynamicTableSize
+  expectEq changed.pendingMinimumSizeUpdate (some 0)
+    "inter-block table changes did not retain the minimum"
+  expectEq changed.pendingSizeUpdate (some Http2.Hpack.defaultDynamicTableSize)
+    "inter-block table changes did not retain the final value"
+  let nextHeaders := #[Header.of "x-next" "another"]
+  let next ← expectErrorOk (Http2.Hpack.encodeHeaderBlock changed nextHeaders)
+  let minimum ← expectErrorOk (Http2.Hpack.decodeInteger 5 next.1 0)
+  let final ← expectErrorOk (Http2.Hpack.decodeInteger 5 next.1 minimum.next)
+  expectEq minimum.value 0 "first table-size update was not the observed minimum"
+  expectEq final.value Http2.Hpack.defaultDynamicTableSize
+    "second table-size update was not the final value"
+  let decodedNext ← expectErrorOk
+    (Http2.Hpack.decodeHeaderBlock decodedSeed.state next.1)
+  expectEq decodedNext.headers nextHeaders
+    "minimum/final table-size updates did not decode"
+  expectEq decodedNext.state.dynamic next.2.dynamic
+    "encoder and decoder diverged across minimum/final table-size updates"
+
+  let required := Http2.Hpack.setDecoderMaxAllowedSize
+    ({} : Http2.Hpack.State) 128
+  let ordinary ← expectErrorOk
+    (Http2.Hpack.encodeHeaderBlock ({} : Http2.Hpack.State) nextHeaders)
+  match Http2.Hpack.decodeHeaderBlock required ordinary.1 with
+  | .error error =>
+      expectEq error.code ErrorCode.compressionError
+        "missing required table-size update used the wrong error"
+  | .ok _ => throw (IO.userError
+      "decoder accepted a block that omitted a required table-size update")
+
+  let update128 ← expectErrorOk (Http2.Hpack.encodeInteger 5 32 128)
+  let update64 ← expectErrorOk (Http2.Hpack.encodeInteger 5 32 64)
+  let update32 ← expectErrorOk (Http2.Hpack.encodeInteger 5 32 32)
+  match Http2.Hpack.decodeHeaderBlock
+      ({} : Http2.Hpack.State) (update32.append update64 |>.append update128) with
+  | .error error =>
+      expectEq error.code ErrorCode.compressionError
+        "third table-size update used the wrong error"
+  | .ok _ => throw (IO.userError "decoder accepted more than two table-size updates")
+  match Http2.Hpack.decodeHeaderBlock
+      ({} : Http2.Hpack.State) (update128.append update64) with
+  | .error error =>
+      expectEq error.code ErrorCode.compressionError
+        "misordered table-size updates used the wrong error"
+  | .ok _ => throw (IO.userError
+      "decoder accepted table-size updates that did not put the minimum first")
+
+def testWireOctetsArePreserved : IO Unit := do
+  let rawValue := bytes [2, 0x80, 0xff]
+  let decodedString ← expectErrorOk (Http2.Hpack.decodeString rawValue 0)
+  expectEq decodedString.octets? (some (bytes [0x80, 0xff]))
+    "non-UTF-8 HPACK value octets were discarded"
+  let rawOctets := bytes [0x80, 0xff]
+  let huffman := Http2.Hpack.encodeHuffman rawOctets
+  let huffmanPrefix ← expectErrorOk
+    (Http2.Hpack.encodeInteger 7 128 huffman.size)
+  let huffmanDecoded ← expectErrorOk
+    (Http2.Hpack.decodeString (huffmanPrefix.append huffman) 0)
+  expectEq huffmanDecoded.octets? (some rawOctets)
+    "Huffman-coded non-UTF-8 value octets were discarded"
+
+  let encodedName ← expectErrorOk (Http2.Hpack.encodeString "x-obs")
+  let literal := (bytes [0]).append encodedName |>.append rawValue
+  let decoded ← expectErrorOk
+    (Http2.Hpack.decodeHeaderBlock ({} : Http2.Hpack.State) literal)
+  let header := decoded.headers[0]!
+  expectEq header.valueOctets (bytes [0x80, 0xff])
+    "decoded field value did not expose its exact wire octets"
+  expectEq (Headers.getOctets? decoded.headers "x-obs") (some (bytes [0x80, 0xff]))
+    "Headers exact-value accessor did not preserve obs-text"
+  expect (Header.validFieldValue header)
+    "valid obs-text octets were rejected as HTTP field content"
+  expectEq (Headers.listEntrySize header) ("x-obs".utf8ByteSize + 2 + 32)
+    "field-list accounting used the String view instead of wire octets"
+  let reencoded ← expectErrorOk
+    (Http2.Hpack.encodeHeaderBlock ({} : Http2.Hpack.State) decoded.headers)
+  let roundTrip ← expectErrorOk
+    (Http2.Hpack.decodeHeaderBlock ({} : Http2.Hpack.State) reencoded.1)
+  expectEq roundTrip.headers[0]!.valueOctets (bytes [0x80, 0xff])
+    "HPACK re-encoding changed non-UTF-8 value octets"
+
+  let indexedLiteral := (bytes [0x40]).append encodedName |>.append rawValue
+  let indexed ← expectErrorOk
+    (Http2.Hpack.decodeHeaderBlock ({} : Http2.Hpack.State) indexedLiteral)
+  let dynamicIndex ← expectErrorOk
+    (Http2.Hpack.encodeInteger 7 128 (Http2.Hpack.staticTableSize + 1))
+  let reused ← expectErrorOk
+    (Http2.Hpack.decodeHeaderBlock indexed.state dynamicIndex)
+  expectEq reused.headers[0]!.valueOctets (bytes [0x80, 0xff])
+    "dynamic indexing lost non-UTF-8 field-value octets"
+
+  let encodedValue ← expectErrorOk (Http2.Hpack.encodeString "v")
+  let invalidNameBlock := (bytes [0, 1, 0xff]).append encodedValue
+  let invalidName ← expectErrorOk
+    (Http2.Hpack.decodeHeaderBlock ({} : Http2.Hpack.State) invalidNameBlock)
+  expectEq invalidName.headers[0]!.nameOctets (bytes [0xff])
+    "invalid field-name octets were discarded"
+  expect (!Header.validFieldName invalidName.headers[0]!)
+    "a non-ASCII field name passed the shared HTTP/2 predicate"
+  let utf8Name ← expectErrorOk (Http2.Hpack.encodeString "ÿ")
+  let utf8NameBlock := (bytes [0]).append utf8Name |>.append encodedValue
+  let validUtf8Name ← expectErrorOk
+    (Http2.Hpack.decodeHeaderBlock ({} : Http2.Hpack.State) utf8NameBlock)
+  expect (invalidName.headers[0]! != validUtf8Name.headers[0]!)
+    "distinct invalid and UTF-8 field-name octets collapsed to one entry"
 
 def testAuthorizationIsNeverIndexed : IO Unit := do
   let authorization := Header.of "authorization" "Bearer production-secret"
@@ -366,5 +490,8 @@ def main : IO Unit := do
   testEncoderDecoderTablesStayInSync
   testEviction
   testDynamicTableSizeUpdateEmitted
+  testIntegerImplementationBound
+  testDynamicTableMinimumAndFinalUpdates
+  testWireOctetsArePreserved
   testAuthorizationIsNeverIndexed
   IO.println "hpack tests passed"

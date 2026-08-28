@@ -35,6 +35,8 @@ private def afterPeerSettings (role : Connection.Role) : IO Connection.State := 
   pure state
 
 private def testSettings : IO Unit := do
+  expect (!(Connection.initial .client).localSettings.enablePush)
+    "a client that cannot process push failed to disable it"
   let frame ← requireOk <| Http2.Settings.frame #[
     { id := SettingId.enableConnectProtocol, value := 1 },
     { id := .initialWindowSize, value := 131072 }
@@ -88,7 +90,12 @@ private def testContinuationExclusivity : IO Unit := do
   expect (error.code == .protocolError) "header interleaving used the wrong error code"
 
 private def testPaddedFlowControl : IO Unit := do
-  let opening ← headersFrame 1 (Headers.singleton ":method" "POST")
+  let request := Headers.empty
+    |>.insert ":method" "POST"
+    |>.insert ":scheme" "https"
+    |>.insert ":authority" "example.test"
+    |>.insert ":path" "/upload"
+  let opening ← headersFrame 1 request
   let initial ← afterPeerSettings .server
   let (state, _, _) ← requireOk <|
     Connection.processFrame initial opening
@@ -119,7 +126,11 @@ private def testPaddedFlowControl : IO Unit := do
     "stream receive credit was not conserved"
 
 private def testOutboundFragmentation : IO Unit := do
-  let headers := Headers.singleton ":method" "CONNECT"
+  let headers := Headers.empty
+    |>.insert ":method" "GET"
+    |>.insert ":scheme" "https"
+    |>.insert ":authority" "example.test"
+    |>.insert ":path" "/"
   let (state, streamId, frames) ← requireOk <|
     Connection.openStream (Connection.initial .client) headers
   expect (streamId == 1 && state.nextLocalStreamId == 3)

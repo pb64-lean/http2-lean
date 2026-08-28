@@ -19,6 +19,7 @@ def maxFramePayloadLength : Nat := 16777215
 def defaultMaxFramePayloadLength : Nat := 16384
 
 @[expose] def maxStreamId : Nat := 2147483647
+def maxUInt32Value : Nat := 4294967295
 
 inductive FrameType where
   | data
@@ -211,6 +212,13 @@ structure DecodeState where
   frames : Array Frame := #[]
   deriving Inhabited
 
+/-- Incremental decode outcome with an optional terminal header-time error.
+Complete frames before the terminal header remain available to the caller. -/
+structure BoundedDecodeResult where
+  state : DecodeState
+  error? : Option Error := none
+  deriving Inhabited
+
 /-- Parse one frame from the front of `buffered`: `none` when more bytes are
 needed, otherwise the frame and the residual bytes. -/
 private def parseFrame? (buffered : ByteArray) :
@@ -248,12 +256,12 @@ private theorem parseFrame?_rest_size {buffered : ByteArray} {frame : Frame}
 
 private def parseBuffered (buffered : ByteArray) (frames : Array Frame) :
     Except Error DecodeState :=
-  match h : parseFrame? buffered with
+  match _h : parseFrame? buffered with
   | .error status => .error status
   | .ok none => .ok { buffered := buffered, frames := frames }
   | .ok (some (frame, rest)) => parseBuffered rest (frames.push frame)
   termination_by buffered.size
-  decreasing_by exact parseFrame?_rest_size h
+  decreasing_by exact parseFrame?_rest_size _h
 
 /-! The proof-facing decoder above recursively parses progressively shorter
 buffer slices.  The executable cursor below retains the original buffer and
@@ -298,6 +306,39 @@ private def decodeChunkCandidate (state : DecodeState) (chunk : ByteArray) :
     Except Error DecodeState :=
   let source := state.buffered.append chunk
   parseBufferedCursor source 0 #[]
+
+private def parseBufferedCursorBounded (source : ByteArray) (offset maxPayloadLength : Nat)
+    (frames : Array Frame) : BoundedDecodeResult :=
+  if source.size < offset + frameHeaderSize then
+    { state := finishDecodeCursor source offset frames }
+  else
+    let header := decodeHeaderAt source offset
+    if header.length > maxPayloadLength then
+      {
+        state := { buffered := ByteArray.empty, frames }
+        error? := some (Error.connection .frameSizeError
+          "received frame exceeds SETTINGS_MAX_FRAME_SIZE")
+      }
+    else
+      let next := offset + frameHeaderSize + header.length
+      if source.size < next then
+        { state := finishDecodeCursor source offset frames }
+      else
+        parseBufferedCursorBounded source next maxPayloadLength (frames.push {
+          header
+          payload := source.extract (offset + frameHeaderSize) next
+        })
+  termination_by source.size - offset
+  decreasing_by
+    simp_all +zetaDelta only [frameHeaderSize]
+    omega
+
+/-- Decode complete frames while rejecting an oversized declared payload as
+soon as its nine-byte header is available. The oversized payload is neither
+awaited nor retained. -/
+def decodeChunkBounded (state : DecodeState) (chunk : ByteArray)
+    (maxPayloadLength : Nat) : Except Error BoundedDecodeResult :=
+  .ok <| parseBufferedCursorBounded (state.buffered.append chunk) 0 maxPayloadLength #[]
 
 private theorem finishDecodeCursor_eq (source : ByteArray) (offset : Nat)
     (frames : Array Frame) :
@@ -778,7 +819,8 @@ def decode (frame : Frame) : Except Error Value := do
   if frame.header.streamId == 0 then
     throw (Error.protocol "HTTP/2 PRIORITY frame must use a stream id")
   if frame.payload.size != 5 then
-    throw (Error.frameSize "HTTP/2 PRIORITY payload must be exactly 5 bytes")
+    throw (Error.stream frame.header.streamId .frameSizeError
+      "HTTP/2 PRIORITY payload must be exactly 5 bytes")
   let rawDependency := Frame.readUInt32BE frame.payload 0
   let streamDependency := rawDependency % (maxStreamId + 1)
   -- RFC 9113 §5.3.2 removed the dependency tree and deprecated PRIORITY.
@@ -830,6 +872,8 @@ def frame (streamId : Nat) (errorCode : ErrorCode) : Except Error Frame := do
     throw (Error.invalidArgument "HTTP/2 RST_STREAM frame must use a stream id")
   if streamId > maxStreamId then
     throw (Error.invalidArgument "HTTP/2 RST_STREAM stream id exceeds 31-bit length")
+  if errorCode.toNat > maxUInt32Value then
+    throw (Error.invalidArgument "HTTP/2 RST_STREAM error code exceeds 32-bit length")
   let payload := Frame.u32BE errorCode.toNat
   pure {
     header := {
@@ -851,7 +895,10 @@ theorem frame_frameType {streamId : Nat} {code : ErrorCode} {out : Frame}
   next =>
     split at h
     next => cases h
-    next => cases h; rfl
+    next =>
+      split at h
+      next => cases h
+      next => cases h; rfl
 
 /-- A built RST_STREAM frame names the stream it was built for: a stream error
 never touches another stream (RFC 9113 §5.4.2). -/
@@ -864,7 +911,10 @@ theorem frame_streamId {streamId : Nat} {code : ErrorCode} {out : Frame}
   next =>
     split at h
     next => cases h
-    next => cases h; rfl
+    next =>
+      split at h
+      next => cases h
+      next => cases h; rfl
 
 def decode (frame : Frame) : Except Error ErrorCode := do
   if frame.header.frameType != FrameType.rstStream then
@@ -889,6 +939,8 @@ def frame (lastStreamId : Nat) (errorCode : ErrorCode)
     (debugData : ByteArray := ByteArray.empty) : Except Error Frame := do
   if lastStreamId > maxStreamId then
     throw (Error.invalidArgument "HTTP/2 GOAWAY last stream id exceeds 31-bit length")
+  if errorCode.toNat > maxUInt32Value then
+    throw (Error.invalidArgument "HTTP/2 GOAWAY error code exceeds 32-bit length")
   let payload := ByteArray.empty
     |>.append (Frame.u31BE lastStreamId)
     |>.append (Frame.u32BE errorCode.toNat)
@@ -945,7 +997,12 @@ def decode (frame : Frame) : Except Error Nat := do
     throw (Error.frameSize "HTTP/2 WINDOW_UPDATE payload must be exactly 4 bytes")
   let increment := Frame.readUInt32BE frame.payload 0 % (maxStreamId + 1)
   if increment == 0 then
-    throw (Error.protocol "HTTP/2 WINDOW_UPDATE increment must be positive")
+    if frame.header.streamId == 0 then
+      throw (Error.connection .protocolError
+        "HTTP/2 connection WINDOW_UPDATE increment must be positive")
+    else
+      throw (Error.stream frame.header.streamId .protocolError
+        "HTTP/2 stream WINDOW_UPDATE increment must be positive")
   pure increment
 
 end WindowUpdate
@@ -957,18 +1014,11 @@ inductive SettingId where
   | initialWindowSize
   | maxFrameSize
   | maxHeaderListSize
+  | enableConnectProtocol
   | unknown (value : Nat)
   deriving Inhabited, Repr, DecidableEq
 
 namespace SettingId
-
-/-- RFC 8441 `SETTINGS_ENABLE_CONNECT_PROTOCOL` (wire identifier `0x8`).
-
-This is intentionally a named value of the existing `unknown` constructor
-rather than a new constructor.  HTTP/2 setting identifiers are extensible, and
-keeping the representation preserves source compatibility for callers that
-exhaustively match the original constructors. -/
-def enableConnectProtocol : SettingId := .unknown 0x8
 
 def toNat : SettingId -> Nat
   | .headerTableSize => 1
@@ -977,6 +1027,7 @@ def toNat : SettingId -> Nat
   | .initialWindowSize => 4
   | .maxFrameSize => 5
   | .maxHeaderListSize => 6
+  | .enableConnectProtocol => 8
   | .unknown value => value
 
 def ofNat : Nat -> SettingId
@@ -986,6 +1037,7 @@ def ofNat : Nat -> SettingId
   | 4 => .initialWindowSize
   | 5 => .maxFrameSize
   | 6 => .maxHeaderListSize
+  | 8 => .enableConnectProtocol
   | value => .unknown value
 
 end SettingId
@@ -1007,6 +1059,8 @@ private def encodePayload (settings : Array Setting) : Except Error ByteArray :=
     let id := setting.id.toNat
     if id > 65535 then
       throw (Error.invalidArgument "HTTP/2 setting id exceeds 16-bit length")
+    if setting.value > maxUInt32Value then
+      throw (Error.invalidArgument "HTTP/2 setting value exceeds 32-bit length")
     pure <| out
       |>.append (Frame.u16BE id)
       |>.append (Frame.u32BE setting.value)

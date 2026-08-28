@@ -38,6 +38,10 @@ namespace Address
 instance : BEq Address where
   beq left right := decide (left = right)
 
+/-- Construct a numeric destination from an already parsed IP address. -/
+def ofIP (ip : Std.Net.IPAddr) (port : UInt16) : Address :=
+  .mk ip port
+
 def family (address : Address) : Family :=
   match address.ip with
   | .v4 _ => .ipv4

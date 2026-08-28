@@ -17,7 +17,12 @@ structure State where
   dynamic : Array Header := #[]
   maxSize : Nat := defaultDynamicTableSize
   maxAllowedSize : Nat := defaultDynamicTableSize
+  pendingMinimumSizeUpdate : Option Nat := none
   pendingSizeUpdate : Option Nat := none
+  /-- Smallest decoder maximum advertised since the preceding field block.
+  The peer must begin the next block with a table-size update no larger than
+  this value. -/
+  requiredMinimumSizeUpdate : Option Nat := none
   deriving Inhabited, Repr
 
 /-- Whether an encoded field block is independent of every preceding outbound
@@ -26,7 +31,8 @@ long as this encoder has selected a zero-sized table, has no stale entries,
 and owes no table-size instruction, encoding cannot consult or change
 connection history. -/
 def State.canReuseHeaderBlock (state : State) : Bool :=
-  state.maxSize == 0 && state.dynamic.isEmpty && state.pendingSizeUpdate.isNone
+  state.maxSize == 0 && state.dynamic.isEmpty &&
+    state.pendingMinimumSizeUpdate.isNone && state.pendingSizeUpdate.isNone
 
 structure IntegerResult where
   value : Nat
@@ -66,6 +72,31 @@ private def decodeIntegerRest (bytes : ByteArray) (offset value shift : Nat) :
   termination_by bytes.size - offset
   decreasing_by omega
 
+private def maximumDecodedInteger : Nat := 18446744073709551615
+
+private def decodeIntegerRestBounded (bytes : ByteArray) (offset value shift : Nat) :
+    Except Error IntegerResult :=
+  if offset >= bytes.size then
+    .error (Error.compression "truncated HPACK integer")
+  else if shift > 63 then
+    .error (Error.compression "HPACK integer exceeds the 64-bit implementation limit")
+  else
+    let byte := bytes[offset]!.toNat
+    let digit := byte % 128
+    let scale := 2 ^ shift
+    if digit > (maximumDecodedInteger - value) / scale then
+      .error (Error.compression "HPACK integer exceeds the 64-bit implementation limit")
+    else
+      let nextValue := value + digit * scale
+      if byte < 128 then
+        .ok { value := nextValue, next := offset + 1 }
+      else
+        decodeIntegerRestBounded bytes (offset + 1) nextValue (shift + 7)
+  termination_by bytes.size - offset
+  decreasing_by omega
+
+attribute [implemented_by decodeIntegerRestBounded] decodeIntegerRest
+
 def decodeInteger (prefixBits : Nat) (bytes : ByteArray) (offset : Nat) :
     Except Error IntegerResult :=
   if prefixBits == 0 || prefixBits > 8 then
@@ -80,7 +111,14 @@ def decodeInteger (prefixBits : Nat) (bytes : ByteArray) (offset : Nat) :
 structure StringResult where
   value : String
   next : Nat
-  deriving Inhabited, Repr, DecidableEq
+  /-- Original wire octets when `value` is only a source-friendly view of
+  non-UTF-8 bytes. -/
+  octets? : Option ByteArray := none
+  deriving Inhabited, DecidableEq
+
+instance : Repr StringResult where
+  reprPrec result precedence := reprPrec
+    (result.value, result.next, result.octets?.map (·.data.toList)) precedence
 
 private def huffmanEOSSymbol : Nat := 256
 
@@ -333,8 +371,7 @@ otherwise (which then lose the size comparison and are emitted literally). -/
 def huffmanCandidate (bytes : ByteArray) : ByteArray :=
   if bytes.size <= huffmanMaxEncodeLength then encodeHuffman bytes else bytes
 
-def encodeString (value : String) : Except Error ByteArray :=
-  let bytes := value.toUTF8
+private def encodeOctets (bytes : ByteArray) : Except Error ByteArray :=
   let huffman := huffmanCandidate bytes
   if huffman.size < bytes.size then
     match encodeInteger 7 128 huffman.size with
@@ -344,6 +381,9 @@ def encodeString (value : String) : Except Error ByteArray :=
     match encodeInteger 7 0 bytes.size with
     | .error status => .error status
     | .ok prefixBytes => .ok (prefixBytes.append bytes)
+
+def encodeString (value : String) : Except Error ByteArray :=
+  encodeOctets value.toUTF8
 
 /-! Keep the proof-facing and executable string decoders separately callable so
 tests can compare the complete length/UTF-8 wrapper as well as the Huffman
@@ -365,9 +405,8 @@ def decodeStringReference (bytes : ByteArray) (offset : Nat) : Except Error Stri
               .ok (bytes.extract length.next (length.next + length.value))) with
           | .error status => .error status
           | .ok raw =>
-              match String.fromUTF8? raw with
-              | some decoded => .ok { value := decoded, next := length.next + length.value }
-              | none => .error (Error.compression "HPACK string is not valid UTF-8")
+              let (value, octets?) := Header.decodeWireString raw
+              .ok { value, next := length.next + length.value, octets? }
 
 def decodeStringLookup (bytes : ByteArray) (offset : Nat) : Except Error StringResult :=
   if offset >= bytes.size then
@@ -385,9 +424,8 @@ def decodeStringLookup (bytes : ByteArray) (offset : Nat) : Except Error StringR
               .ok (bytes.extract length.next (length.next + length.value))) with
           | .error status => .error status
           | .ok raw =>
-              match String.fromUTF8? raw with
-              | some decoded => .ok { value := decoded, next := length.next + length.value }
-              | none => .error (Error.compression "HPACK string is not valid UTF-8")
+              let (value, octets?) := Header.decodeWireString raw
+              .ok { value, next := length.next + length.value, octets? }
 
 @[implemented_by decodeStringLookup]
 def decodeString (bytes : ByteArray) (offset : Nat) : Except Error StringResult :=
@@ -462,20 +500,18 @@ def staticTableSize : Nat :=
   staticEntries.size
 
 private def entrySizeReference (header : Header) : Nat :=
-  header.name.toUTF8.size + header.value.toUTF8.size + 32
+  header.nameOctets.size + header.valueOctets.size + 32
 
 private def entrySizeCandidate (header : Header) : Nat :=
-  header.name.utf8ByteSize + header.value.utf8ByteSize + 32
+  header.nameOctets.size + header.valueOctets.size + 32
 
 private theorem entrySizeCandidate_eq_reference (header : Header) :
     entrySizeCandidate header = entrySizeReference header := by
   unfold entrySizeCandidate entrySizeReference
-  rw [String.toUTF8_eq_toByteArray, String.toUTF8_eq_toByteArray,
-    String.size_toByteArray, String.size_toByteArray]
+  rfl
 
-/-- RFC 7541 dynamic-table accounting.  The logical definition retains the
-former byte-array sizes; generated code reads each string's cached UTF-8 byte
-size without allocating a temporary `ByteArray`. -/
+/-- RFC 7541 dynamic-table accounting over the exact encoded name and value
+octets, including non-UTF-8 field content retained from the wire. -/
 @[implemented_by entrySizeCandidate]
 def entrySize (header : Header) : Nat :=
   entrySizeReference header
@@ -486,13 +522,13 @@ def dynamicSize (entries : Array Header) : Nat :=
 private def evictTo (maxSize : Nat) (entries : Array Header) : Array Header :=
   if dynamicSize entries <= maxSize then
     entries
-  else if hempty : entries.isEmpty then
+  else if _hempty : entries.isEmpty then
     entries
   else
     evictTo maxSize entries.pop
   termination_by entries.size
   decreasing_by
-    simp only [Array.isEmpty, decide_eq_true_eq] at hempty
+    simp only [Array.isEmpty, decide_eq_true_eq] at _hempty
     simp only [Array.size_pop]
     omega
 
@@ -503,8 +539,30 @@ def resize (state : State) (maxSize : Nat) : State :=
   { state with maxSize := maxSize, dynamic := evictTo maxSize state.dynamic }
 
 def setMaxAllowedSize (state : State) (maxSize : Nat) : State :=
-  let pending := if maxSize != state.maxSize then some maxSize else state.pendingSizeUpdate
-  { (resize state maxSize) with maxAllowedSize := maxSize, pendingSizeUpdate := pending }
+  let changed := maxSize != state.maxSize
+  let minimum := if changed then
+      some <| min maxSize (state.pendingMinimumSizeUpdate.getD maxSize)
+    else state.pendingMinimumSizeUpdate
+  let final := if changed then some maxSize else state.pendingSizeUpdate
+  { (resize state maxSize) with
+    maxAllowedSize := maxSize
+    pendingMinimumSizeUpdate := minimum
+    pendingSizeUpdate := final
+  }
+
+/-- Apply a locally advertised decoder-table limit. A reduction evicts
+immediately and records the leading update required from the peer; an
+increase permits, but does not itself select, a larger dynamic table. -/
+def setDecoderMaxAllowedSize (state : State) (maxAllowedSize : Nat) : State :=
+  let selectedSize := min state.maxSize maxAllowedSize
+  let required := if maxAllowedSize < state.maxSize then
+      some <| min maxAllowedSize
+        (state.requiredMinimumSizeUpdate.getD maxAllowedSize)
+    else state.requiredMinimumSizeUpdate
+  { (resize state selectedSize) with
+    maxAllowedSize
+    requiredMinimumSizeUpdate := required
+  }
 
 /-- Disable the encoder dynamic table while retaining the peer-advertised
 upper bound.  A pending size update of zero makes the choice explicit to the
@@ -516,6 +574,9 @@ def withoutDynamicTable (state : State := {}) : State :=
     state with
     dynamic := #[],
     maxSize := 0,
+    pendingMinimumSizeUpdate := if state.maxSize == 0 then
+        state.pendingMinimumSizeUpdate
+      else some 0
     pendingSizeUpdate := if state.maxSize == 0 then state.pendingSizeUpdate else some 0
   }
 
@@ -550,7 +611,7 @@ private def findExactIn (entries : Array Header) (header : Header) (i start : Na
     none
   else
     let entry := entries[i]!
-    if entry.name == header.name && entry.value == header.value then
+    if entry.nameOctets == header.nameOctets && entry.valueOctets == header.valueOctets then
       some (start + i)
     else
       findExactIn entries header (i + 1) start
@@ -585,56 +646,87 @@ structure DecodeResult where
   state : State
 
 private def decodeLiteralName (state : State) (index : Nat) (block : ByteArray) (offset : Nat) :
-    Except Error (String × Nat) := do
+    Except Error (String × Option ByteArray × Nat) := do
   if index == 0 then
     let name ← decodeString block offset
-    if Header.normalizeName name.value != name.value then
-      throw (Error.compression s!"HTTP/2 header field name must be lowercase: {name.value}")
-    else
-      pure (name.value, name.next)
+    pure (name.value, name.octets?, name.next)
   else
     match get? state index with
-    | some header => pure (header.name, offset)
+    | some header => pure (header.name, header.nameOctets?, offset)
     | none => throw (Error.compression s!"unknown HPACK name index {index}")
 
 private def decodeLiteral (state : State) (block : ByteArray) (offset prefixBits : Nat)
     (incremental : Bool) : Except Error (Header × State × Nat) := do
   let index ← decodeInteger prefixBits block offset
-  let (name, next) ← decodeLiteralName state index.value block index.next
+  let (name, nameOctets?, next) ← decodeLiteralName state index.value block index.next
   let value ← decodeString block next
-  let header : Header := { name := name, value := value.value }
+  let header : Header := {
+    name
+    value := value.value
+    nameOctets?
+    valueOctets? := value.octets?
+  }
   let state := if incremental then insert state header else state
   pure (header, state, value.next)
 
 private partial def decodeLoop (block : ByteArray) (offset : Nat) (state : State)
-    (headers : Array Header) (sawHeader : Bool) : Except Error DecodeResult := do
+    (headers : Array Header) (sawHeader : Bool) (sizeUpdates : Nat := 0)
+    (firstSizeUpdate? : Option Nat := none) : Except Error DecodeResult := do
   if offset >= block.size then
+    if state.requiredMinimumSizeUpdate.isSome then
+      throw (Error.compression
+        "HPACK field block omitted a required dynamic table size update")
     pure { headers := headers, state := state }
   else
     let byte := block[offset]!.toNat
     if byte >= 128 then
+      if state.requiredMinimumSizeUpdate.isSome then
+        throw (Error.compression
+          "HPACK field block omitted a required dynamic table size update")
       let index ← decodeInteger 7 block offset
       match get? state index.value with
-      | some header => decodeLoop block index.next state (headers.push header) true
+      | some header =>
+          decodeLoop block index.next state (headers.push header) true
+            sizeUpdates firstSizeUpdate?
       | none => throw (Error.compression s!"unknown HPACK header index {index.value}")
     else if byte >= 64 then
+      if state.requiredMinimumSizeUpdate.isSome then
+        throw (Error.compression
+          "HPACK field block omitted a required dynamic table size update")
       let (header, state, next) ← decodeLiteral state block offset 6 true
-      decodeLoop block next state (headers.push header) true
+      decodeLoop block next state (headers.push header) true sizeUpdates firstSizeUpdate?
     else if byte >= 32 then
       if sawHeader then
         throw (Error.compression "HPACK dynamic table size update must precede header fields")
+      if sizeUpdates >= 2 then
+        throw (Error.compression
+          "HPACK field block contains more than two dynamic table size updates")
       let size ← decodeInteger 5 block offset
+      if state.requiredMinimumSizeUpdate.any (size.value > ·) then
+        throw (Error.compression
+          "HPACK field block did not signal the required minimum table size")
+      if firstSizeUpdate?.any (size.value < ·) then
+        throw (Error.compression
+          "HPACK dynamic table size updates did not signal the smallest value first")
       let state ← resizeChecked state size.value
-      decodeLoop block size.next state headers false
+      let state := { state with requiredMinimumSizeUpdate := none }
+      decodeLoop block size.next state headers false (sizeUpdates + 1)
+        (firstSizeUpdate?.orElse fun _ => some size.value)
     else if byte >= 16 then
+      if state.requiredMinimumSizeUpdate.isSome then
+        throw (Error.compression
+          "HPACK field block omitted a required dynamic table size update")
       let (header, state, next) ← decodeLiteral state block offset 4 false
-      decodeLoop block next state (headers.push header) true
+      decodeLoop block next state (headers.push header) true sizeUpdates firstSizeUpdate?
     else
+      if state.requiredMinimumSizeUpdate.isSome then
+        throw (Error.compression
+          "HPACK field block omitted a required dynamic table size update")
       let (header, state, next) ← decodeLiteral state block offset 4 false
-      decodeLoop block next state (headers.push header) true
+      decodeLoop block next state (headers.push header) true sizeUpdates firstSizeUpdate?
 
 def decodeHeaderBlock (state : State) (block : ByteArray) : Except Error DecodeResult :=
-  decodeLoop block 0 state #[] false
+  decodeLoop block 0 state #[] false 0 none
 
 private def encodeIndexed (index : Nat) : Except Error ByteArray :=
   if index == 0 then
@@ -644,15 +736,22 @@ private def encodeIndexed (index : Nat) : Except Error ByteArray :=
 
 private def encodeLiteralNameAndValue (state : State) (header : Header) (prefixBits prefixMask : Nat) :
     Except Error ByteArray := do
-  match findName? state header.name with
+  let nameBytes := header.nameOctets
+  let findNameOctetsIn (entries : Array Header) (start : Nat) : Option Nat :=
+    (List.range entries.size).findSome? fun index =>
+      if entries[index]!.nameOctets == nameBytes then some (start + index) else none
+  let nameIndex? := match findNameOctetsIn staticEntries 1 with
+    | some index => some index
+    | none => findNameOctetsIn state.dynamic (staticEntries.size + 1)
+  match nameIndex? with
   | some index =>
       let prefixBytes ← encodeInteger prefixBits prefixMask index
-      let value ← encodeString header.value
+      let value ← encodeOctets header.valueOctets
       pure (prefixBytes.append value)
   | none =>
       let prefixBytes ← encodeInteger prefixBits prefixMask 0
-      let name ← encodeString header.name
-      let value ← encodeString header.value
+      let name ← encodeOctets nameBytes
+      let value ← encodeOctets header.valueOctets
       pure (prefixBytes.append name |>.append value)
 
 def encodeLiteralWithoutIndexing (state : State) (header : Header) : Except Error ByteArray :=
@@ -689,9 +788,14 @@ def encodeHeader (state : State) (header : Header) : Except Error (ByteArray × 
 def encodeHeaderBlock (state : State) (headers : Array Header) : Except Error (ByteArray × State) := do
   let (out, state) ←
     match state.pendingSizeUpdate with
-    | some size => do
-        let update ← encodeInteger 5 32 size
-        pure (update, { state with pendingSizeUpdate := none })
+    | some final => do
+        let minimum := state.pendingMinimumSizeUpdate.getD final
+        let first ← encodeInteger 5 32 minimum
+        let out ← if final == minimum then pure first
+          else pure (first.append (← encodeInteger 5 32 final))
+        pure (out, {
+          state with pendingMinimumSizeUpdate := none, pendingSizeUpdate := none
+        })
     | none => pure (ByteArray.empty, state)
   headers.foldlM (init := (out, state)) fun (out, state) header => do
     let (encoded, state) ← encodeHeader state header
@@ -1672,7 +1776,7 @@ private theorem encodeHuffmanFlush_spec (acc bits : Nat) (out : ByteArray) :
     exact ⟨by omega, hacc, rfl⟩
 
 private theorem encodeHuffmanStep_spec (acc bits : Nat) (out : ByteArray) (byte : UInt8)
-    (hbits : bits < 8) (hacc : acc < 2 ^ bits) :
+    (_hbits : bits < 8) (hacc : acc < 2 ^ bits) :
     ∀ acc' bits' out', encodeHuffmanStep (acc, bits, out) byte = (acc', bits', out') ->
       bits' < 8 ∧ acc' < 2 ^ bits'
         ∧ bitsOf out' ++ natBits bits' acc'
@@ -1872,7 +1976,7 @@ private theorem decodeString_prefixed {value : String} {payload prefixBytes : By
   rw [if_neg (by omega), hdec]
   simp only
   rw [if_neg (by omega), hextract, hbranch]
-  simp only [fromUTF8?_toUTF8]
+  simp only [Header.decodeWireString, fromUTF8?_toUTF8]
   rw [ByteArray.size_append]
 
 /-- Residual-byte inversion for HPACK literal strings: decoding
@@ -1882,7 +1986,7 @@ encoder chose. -/
 theorem decodeString_encodeString {value : String} {encoded : ByteArray}
     (henc : encodeString value = .ok encoded) (rest : ByteArray) :
     decodeString (encoded ++ rest) 0 = .ok { value := value, next := encoded.size } := by
-  unfold encodeString at henc
+  unfold encodeString encodeOctets at henc
   simp only at henc
   split at henc
   next hshorter =>

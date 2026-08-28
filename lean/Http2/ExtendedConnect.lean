@@ -91,12 +91,7 @@ private def singletonPseudo (headers : Headers) (name : String) : Except Error S
   pure values[0]!
 
 private def isTokenChar (c : Char) : Bool :=
-  let n := c.toNat
-  (0x30 ≤ n && n ≤ 0x39) || (0x41 ≤ n && n ≤ 0x5a) ||
-    (0x61 ≤ n && n ≤ 0x7a) ||
-    c == '!' || c == '#' || c == '$' || c == '%' || c == '&' ||
-    c == '\'' || c == '*' || c == '+' || c == '-' || c == '.' || c == '^' ||
-    c == '_' || c == '`' || c == '|' || c == '~'
+  Header.isTokenCharacter c
 
 /-- HTTP token syntax used by the `:protocol` pseudo-header. -/
 def validProtocolToken (value : String) : Bool :=
@@ -111,39 +106,19 @@ private def forbiddenHttp2FieldName (name : String) : Bool :=
     name == "proxy-connection" || name == "transfer-encoding" ||
     name == "upgrade"
 
-private def validHttp2FieldName (name : String) : Bool :=
-  !name.isEmpty && name.all fun c => c.toLower == c && isTokenChar c
-
-private def httpFieldValueChar (c : Char) : Bool :=
-  let n := c.toNat
-  n == 0x09 || (0x20 ≤ n && n != 0x7f)
-
-private def optionalWhitespace (c : Char) : Bool :=
-  c == ' ' || c.toNat == 0x09
-
-/-- Strict field-content accepted at the API boundary. It excludes controls and
-leading or trailing optional whitespace while permitting internal SP and HTAB. -/
-private def validHttp2FieldValue (value : String) : Bool :=
-  value.all httpFieldValueChar &&
-    (match value.toList with
-    | [] => true
-    | first :: rest =>
-        !optionalWhitespace first &&
-          !(optionalWhitespace (rest.getLastD first)))
-
 private def validateFieldValue (kind value : String) : Except Error Unit := do
-  unless validHttp2FieldValue value do
+  unless Header.validFieldValue (Header.of "x-value" value) do
     throw (Error.invalidArgument s!"invalid HTTP/2 {kind} value")
 
 private def validateOrdinaryHeader (header : Header) : Except Error Unit := do
-  unless validHttp2FieldName header.name do
+  unless Header.validFieldName header do
     throw (Error.invalidArgument s!"invalid HTTP/2 field name {header.name}")
   if forbiddenHttp2FieldName header.name then
     throw (Error.invalidArgument
       s!"HTTP/2 connection-specific field is forbidden: {header.name}")
   if header.name == "te" && header.value.toLower != "trailers" then
     throw (Error.invalidArgument "HTTP/2 TE field value must be trailers")
-  unless validHttp2FieldValue header.value do
+  unless Header.validFieldValue header do
     throw (Error.invalidArgument s!"invalid HTTP/2 field value for {header.name}")
 
 private def validatePseudoHeaderLayout (headers : Headers) : Except Error Unit := do
@@ -185,14 +160,12 @@ def decodeRequest (headers : Headers) : Except Error Request := do
     throw (Error.invalidArgument
       "extended CONNECT :protocol is not a valid HTTP token")
   let scheme ← singletonPseudo headers ":scheme"
-  if scheme.isEmpty then
-    throw (Error.invalidArgument "extended CONNECT :scheme must not be empty")
   let authority ← singletonPseudo headers ":authority"
-  if authority.isEmpty then
-    throw (Error.invalidArgument "extended CONNECT :authority must not be empty")
   let path ← singletonPseudo headers ":path"
-  if path.isEmpty then
-    throw (Error.invalidArgument "extended CONNECT :path must not be empty")
+  unless RequestTarget.valid "CONNECT" scheme path &&
+      RequestTarget.validAuthority scheme authority do
+    throw (Error.invalidArgument
+      "extended CONNECT scheme, authority, or path is not a valid request target")
   pure { protocol, scheme, authority, path, headers := ordinaryHeaders headers }
 
 private def validateOrdinaryOutbound (kind : String) (headers : Headers) :
@@ -208,9 +181,10 @@ def encodeRequest (request : Request) : Except Error Headers := do
   unless validProtocolToken request.protocol do
     throw (Error.invalidArgument
       "extended CONNECT :protocol is not a valid HTTP token")
-  if request.scheme.isEmpty || request.authority.isEmpty || request.path.isEmpty then
+  unless RequestTarget.valid "CONNECT" request.scheme request.path &&
+      RequestTarget.validAuthority request.scheme request.authority do
     throw (Error.invalidArgument
-      "extended CONNECT scheme, authority, and path must not be empty")
+      "extended CONNECT scheme, authority, or path is not a valid request target")
   validateFieldValue "`:scheme` pseudo-header" request.scheme
   validateFieldValue "`:authority` pseudo-header" request.authority
   validateFieldValue "`:path` pseudo-header" request.path

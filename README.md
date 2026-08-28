@@ -17,8 +17,10 @@ The library provides application-independent HTTP/2 machinery:
 - settings, stream lifecycle, connection state, and error handling;
 - connection- and stream-level flow control;
 - header-block continuation and validation;
-- Extended CONNECT support; and
-- transport-neutral state machines with explicit effectful adapters.
+- Extended CONNECT support;
+- transport-neutral state machines with explicit effectful adapters;
+- managed h2c and TLS client connections for Extended CONNECT; and
+- managed h2c and TLS listeners with graceful GOAWAY-based shutdown.
 
 Application protocols and their message formats, metadata policies, status
 models, dispatch rules, and service runtimes are outside this library's scope.
@@ -43,6 +45,10 @@ bazel build //...
 bazel test //...
 ```
 
+An optional Docker-backed interoperability smoke exercises the RFC 7541 HPACK
+boundary against a digest-pinned external tool. Its intentionally narrow scope
+and invocation are documented in [Conformance/README.md](Conformance/README.md).
+
 The standalone dependency-mode check runs separately:
 
 ```console
@@ -56,9 +62,24 @@ Lake supplies an editor project model and a compatibility build:
 lake build
 ```
 
+## Library layers
+
+The protocol core is exposed as `@http2_lean//:http2_core`. It contains no
+socket, TLS, DNS, or host-filesystem dependency. `@http2_lean//:http2_client`
+and `@http2_lean//:http2_server` add managed transports. The `:http2` facade
+exports all three layers, while `:runtime` provides the optional environment
+adapters.
+
+Client and server transports require the HTTP/2 connection preface and initial
+SETTINGS exchange. The cleartext entry points use prior-knowledge h2c; they do
+not implement an HTTP/1.1 Upgrade path. TLS entry points require ALPN `h2`.
+Connections retain their reader and writer owners until explicit close or
+server shutdown, and tunnel operations surface typed connection-, stream-, and
+local-input failures.
+
 ## Bazel module
 
-After the first public module release, consumers will declare:
+Consumers declare:
 
 ```starlark
 bazel_dep(
@@ -68,10 +89,9 @@ bazel_dep(
 )
 ```
 
-The public Lean import root is `Http2`, exposed to Bazel consumers as
-`@http2_lean//:http2`. Optional application-independent adapters are imported
-through `Http2.Runtime` and exposed as `@http2_lean//:runtime`; their individual
-targets remain available when a consumer needs a smaller dependency closure.
+The public Lean import root is `Http2`. Optional application-independent
+adapters are imported through `Http2.Runtime`; their individual targets remain
+available when a consumer needs a smaller dependency closure.
 
 ## Security
 

@@ -1,13 +1,14 @@
 """Public Lean import root."""
 
-load("@rules_lean//lean:defs.bzl", "lean_library")
+load("@rules_lean//lean:defs.bzl", "lean_assurance_test", "lean_library")
+load("//:assurance.bzl", "HTTP2_ALLOWED_AXIOMS", "HTTP2_CORE_IMPLEMENTED_BY")
+load("//:assurance_types.bzl", "HTTP2_CORE_PRINCIPAL_TYPES")
 
 package(default_visibility = ["//visibility:public"])
 
 lean_library(
-    name = "http2",
+    name = "http2_core",
     srcs = [
-        "Http2.lean",
         "Http2/Bytes.lean",
         "Http2/Connection.lean",
         "Http2/Error.lean",
@@ -17,6 +18,60 @@ lean_library(
         "Http2/Hpack.lean",
     ],
     strip_module_prefix = "lean",
+)
+
+lean_assurance_test(
+    name = "http2_core_assurance",
+    policy_mode = "exact",
+    allowed_axioms = HTTP2_ALLOWED_AXIOMS,
+    module_prefixes = ["Http2"],
+    unaudited_module_prefixes = [],
+    principal_theorems = HTTP2_CORE_PRINCIPAL_TYPES.keys(),
+    principal_theorem_types = HTTP2_CORE_PRINCIPAL_TYPES,
+    expected_unsafe_constants = [],
+    expected_partial_definitions = [
+        "Http2.Hpack.decodeLoop",
+    ],
+    expected_opaque_constants = [],
+    expected_implemented_by = HTTP2_CORE_IMPLEMENTED_BY,
+    expected_extern_declarations = {},
+    expected_native_targets = [],
+    deps = [":http2_core"],
+)
+
+lean_library(
+    name = "client",
+    srcs = ["Http2/Client.lean"],
+    strip_module_prefix = "lean",
+    deps = [
+        ":cancellation_token",
+        ":http2_core",
+        ":tls_session",
+        "@tls13_lean//TLS13:tls13",
+    ],
+)
+
+lean_library(
+    name = "server",
+    srcs = ["Http2/Server.lean"],
+    strip_module_prefix = "lean",
+    deps = [
+        ":cancellation_token",
+        ":http2_core",
+        ":tls_session",
+        "@tls13_lean//Tls:tls",
+    ],
+)
+
+lean_library(
+    name = "http2",
+    srcs = ["Http2.lean"],
+    strip_module_prefix = "lean",
+    deps = [
+        ":client",
+        ":http2_core",
+        ":server",
+    ],
 )
 
 lean_library(
@@ -76,5 +131,74 @@ lean_library(
         ":posix",
         ":tls_session",
         ":trust_anchors",
+    ],
+)
+
+lean_assurance_test(
+    name = "http2_runtime_assurance",
+    policy_mode = "exact",
+    allowed_axioms = HTTP2_ALLOWED_AXIOMS,
+    module_prefixes = ["Http2"],
+    unaudited_module_prefixes = [
+        "HaclStar",
+        "TLS13",
+        "Tls",
+    ],
+    principal_theorems = HTTP2_CORE_PRINCIPAL_TYPES.keys(),
+    principal_theorem_types = HTTP2_CORE_PRINCIPAL_TYPES,
+    expected_unsafe_constants = [],
+    expected_partial_definitions = [
+        "Http2.Client.awaitCapability",
+        "Http2.Client.awaitResponse",
+        "Http2.Client.beginExtendedConnect",
+        "Http2.Client.failQueuedWrites",
+        "Http2.Client.readerLoop",
+        "Http2.Client.receiveChunk",
+        "Http2.Client.sendChunks",
+        "Http2.Client.waitTunnel",
+        "Http2.Client.writerLoop",
+        "Http2.Hpack.decodeLoop",
+        "Http2.Server.acceptPlainLoop",
+        "Http2.Server.acceptTlsLoop",
+        "Http2.Server.failQueuedWrites",
+        "Http2.Server.keepaliveLoop",
+        "Http2.Server.sendTunnelBytes",
+        "Http2.Server.servePlainLoop",
+        "Http2.Server.serveTlsLoop",
+        "Http2.Server.waitActiveConnections",
+        "Http2.Server.waitTunnel",
+        "Http2.Server.wireLoop",
+        "Http2.Tls.ServerSession.recvApp",
+        "Http2.Tls.Session.Http2.Tls.clientHandshakeLoop",
+        "Http2.Tls.Session.Http2.Tls.serverHandshakeLoop",
+        "Http2.Tls.Session.Http2.Tls.writerLoop",
+        "Http2.TrustAnchors.readDescriptorBounded",
+        "Http2.TrustAnchors.readHandleBounded",
+    ],
+    expected_opaque_constants = [
+        "Http2.Posix.Native.closeRaw",
+        "Http2.Posix.Native.fstatRaw",
+        "Http2.Posix.Native.openRaw",
+        "Http2.Posix.Native.readRaw",
+        "Http2.Posix.Native.strerrorRaw",
+    ],
+    expected_implemented_by = HTTP2_CORE_IMPLEMENTED_BY,
+    expected_extern_declarations = {
+        "Http2.Posix.Native.closeRaw": "all:standard:lean_http2_posix_close_raw",
+        "Http2.Posix.Native.fstatRaw": "all:standard:lean_http2_posix_fstat_raw",
+        "Http2.Posix.Native.openRaw": "all:standard:lean_http2_posix_open_raw",
+        "Http2.Posix.Native.readRaw": "all:standard:lean_http2_posix_read_raw",
+        "Http2.Posix.Native.strerrorRaw": "all:standard:lean_http2_posix_strerror_raw",
+    },
+    expected_native_targets = [
+        "//native:lean_runtime_headers",
+        "//native:posix_ffi",
+        "@tls13-lean++_repo_rules+hacl//:hacl",
+        "@tls13-lean+//HaclStar:hacl_shim",
+        "@tls13-lean+//HaclStar:lean_runtime_headers",
+    ],
+    deps = [
+        ":http2",
+        ":runtime",
     ],
 )

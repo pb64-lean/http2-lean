@@ -87,8 +87,51 @@ def testRequestFailures : IO Unit := do
       validRequest with path := " /leading-space"
     }) "leading whitespace in outbound :path was accepted"
   expectError (ExtendedConnect.encodeRequest {
+      validRequest with scheme := "1https"
+    }) "an invalid outbound URI scheme was accepted"
+  expectError (ExtendedConnect.encodeRequest {
+      validRequest with path := "/chat#fragment"
+    }) "a fragment in outbound :path was accepted"
+  expectError (ExtendedConnect.encodeRequest {
+      validRequest with authority := "user@example.test"
+    }) "userinfo in outbound https :authority was accepted"
+  expectError (ExtendedConnect.encodeRequest {
       validRequest with headers := #[{ name := ":status", value := "200" }]
     }) "an application-supplied pseudo-header was accepted"
+
+  let replacePseudo (name value : String) : Headers :=
+    encoded.map fun header => if header.name == name then { header with value } else header
+  expectError (ExtendedConnect.decodeRequest (replacePseudo ":scheme" "1https"))
+    "an invalid decoded URI scheme was accepted"
+  expectError (ExtendedConnect.decodeRequest (replacePseudo ":path" "/chat%2"))
+    "an invalid decoded percent escape was accepted"
+  expectError (ExtendedConnect.decodeRequest
+      (replacePseudo ":authority" "user@example.test"))
+    "decoded userinfo in https :authority was accepted"
+  let rawInvalidPath := encoded.map fun header =>
+    if header.name == ":path" then {
+      header with
+      value := String.singleton (Char.ofNat 0xff)
+      valueOctets? := some (ByteArray.mk #[0xff])
+    } else header
+  expectError (ExtendedConnect.decodeRequest rawInvalidPath)
+    "non-UTF-8 request-target octets were accepted"
+  let rawControl := encoded.push {
+    name := "x-raw"
+    value := String.ofList [Char.ofNat 0x80, '\n']
+    valueOctets? := some (ByteArray.mk #[0x80, 0x0a])
+  }
+  expectError (ExtendedConnect.decodeRequest rawControl)
+    "raw control octets were accepted as ordinary field content"
+  let rawObs := encoded.push {
+    name := "x-raw"
+    value := String.ofList [Char.ofNat 0x80, Char.ofNat 0xff]
+    valueOctets? := some (ByteArray.mk #[0x80, 0xff])
+  }
+  let decodedRaw ← requireOk (ExtendedConnect.decodeRequest rawObs)
+  expect (Headers.getOctets? decodedRaw.headers "x-raw" ==
+      some (ByteArray.mk #[0x80, 0xff]))
+    "valid raw obs-text was not retained by the codec"
 
 def testResponses : IO Unit := do
   let response : ExtendedConnect.Response := {

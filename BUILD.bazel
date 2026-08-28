@@ -11,12 +11,29 @@ exports_files([
     "MODULE.bazel.lock",
     "README.md",
     "SECURITY.md",
+    "assurance.bzl",
+    "assurance_types.bzl",
     "lean-toolchain",
 ])
 
 alias(
     name = "http2",
     actual = "//lean:http2",
+)
+
+alias(
+    name = "http2_client",
+    actual = "//lean:client",
+)
+
+alias(
+    name = "http2_core",
+    actual = "//lean:http2_core",
+)
+
+alias(
+    name = "http2_server",
+    actual = "//lean:server",
 )
 
 alias(
