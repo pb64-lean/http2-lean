@@ -87,7 +87,20 @@ bazel_dep(
     version = "0.1.0",
     repo_name = "http2_lean",
 )
+archive_override(
+    module_name = "http2-lean",
+    integrity = "sha256-rVteydmJ4HoqzdoL+9VEJMXCfJ07r++od1ftyBsnypI=",
+    strip_prefix = "http2-lean-0.1.0",
+    urls = [
+        "https://github.com/pb64-lean/http2-lean/archive/refs/tags/v0.1.0.tar.gz",
+    ],
+)
 ```
+
+The integrity value fixes the exact release contents even if a tag reference
+is changed upstream. Until all transitive modules are available through a
+Bazel registry, a root module must likewise provide immutable resolution for
+the dependencies declared in `MODULE.bazel`.
 
 The public Lean import root is `Http2`. Optional application-independent
 adapters are imported through `Http2.Runtime`; their individual targets remain
