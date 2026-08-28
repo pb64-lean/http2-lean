@@ -37,6 +37,43 @@ private def afterPeerSettings (role : Connection.Role) : IO Connection.State := 
 private def testSettings : IO Unit := do
   expect (!(Connection.initial .client).localSettings.enablePush)
     "a client that cannot process push failed to disable it"
+  let advertised : Connection.Settings := {
+    enablePush := false
+    initialWindowSize := 131072
+    maxHeaderListSize := some 4096
+    enableConnectProtocol := true
+  }
+  let client := Connection.initial .client advertised
+  let values := Connection.initialSettingsValues client
+  expect (values.any fun setting =>
+      setting.id == .enablePush && setting.value == 0)
+    "the client preface did not explicitly disable server push"
+  expect (values.any fun setting =>
+      setting.id == .initialWindowSize && setting.value == 131072)
+    "the client preface drifted from its configured receive window"
+  let clientWire ← requireOk <| Connection.initialWireBytes client
+  expect (clientWire.extract 0 connectionPreface.size == connectionPreface)
+    "the client opening bytes omitted the HTTP/2 connection preface"
+  let clientFrames ← requireOk <|
+    Frame.decodeAll (clientWire.extract connectionPreface.size clientWire.size)
+  expect (clientFrames.size == 1)
+    "the client opening bytes did not contain exactly one SETTINGS frame"
+  let clientValues ← requireOk <| Http2.Settings.decode clientFrames[0]!
+  expect (clientValues == values)
+    "the client opening bytes did not encode its state settings"
+
+  let server := Connection.initial .server advertised
+  let serverValues := Connection.initialSettingsValues server
+  expect (!(serverValues.any fun setting => setting.id == .enablePush))
+    "a server emitted the client-only SETTINGS_ENABLE_PUSH value"
+  let serverWire ← requireOk <| Connection.initialWireBytes server
+  let serverFrames ← requireOk <| Frame.decodeAll serverWire
+  expect (serverFrames.size == 1)
+    "the server opening bytes did not contain exactly one SETTINGS frame"
+  let decodedServerValues ← requireOk <| Http2.Settings.decode serverFrames[0]!
+  expect (decodedServerValues == serverValues)
+    "the server opening bytes did not encode its state settings"
+
   let frame ← requireOk <| Http2.Settings.frame #[
     { id := SettingId.enableConnectProtocol, value := 1 },
     { id := .initialWindowSize, value := 131072 }

@@ -24,5 +24,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   connection-wide compression synchronization across reset races, bounded
   graceful shutdown, keepalive supervision, and exact assurance policies for
   both the pure core and runtime boundary.
+- State-derived initial SETTINGS and preface construction, so advertised wire
+  values cannot drift from the settings enforced by the connection state.
+- Automatic transport retirement when a peer closes or a background reader
+  encounters a terminal protocol failure, with idempotent explicit close.
 - A reproducible external HPACK smoke check using digest-pinned h2spec cases,
   explicitly scoped to RFC 7541 rather than the tool's broad RFC 7540 suite.

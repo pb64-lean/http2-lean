@@ -410,35 +410,6 @@ private def nextReaderEvent (connection : Connection) : Async ReaderEvent := do
             (IO.userError "TLS record writer failed")
           pure (.writerFailed error)
 
-private partial def readerLoop (connection : Connection)
-    (pending? : Option ByteArray := none) : Async Unit := do
-  if let some chunk := pending? then
-    if ← processInboundChunk connection chunk then readerLoop connection none
-    return
-  let event ← try Except.ok <$> nextReaderEvent connection
-    catch error => pure (Except.error error)
-  match event with
-  | .error error => failConnection connection (transportError error)
-  | .ok .stop =>
-      failConnection connection (Error.connection .cancel "HTTP/2 connection closed locally")
-  | .ok (.writerFailed error) => failConnection connection (transportError error)
-  | .ok (.received none) =>
-      failConnection connection (Error.connection .internalError
-        "HTTP/2 connection closed by peer")
-  | .ok (.received (some raw)) =>
-      let plaintext? : Except IO.Error (Option ByteArray) ← try
-          match connection.tls with
-          | none => pure (Except.ok (some raw))
-          | some session => pure (Except.ok (← session.feedInbound raw))
-        catch error => pure (Except.error error)
-      match plaintext? with
-      | Except.error error => failConnection connection (transportError error)
-      | Except.ok none =>
-          failConnection connection (Error.connection .internalError
-            "TLS peer closed the HTTP/2 connection")
-      | Except.ok (some plaintext) =>
-          if ← processInboundChunk connection plaintext then readerLoop connection none
-
 private partial def failQueuedWrites (connection : Connection) (error : IO.Error) :
     Async Unit := do
   match ← await (← connection.outbound.recv) with
@@ -465,14 +436,6 @@ private partial def writerLoop (connection : Connection) : Async Unit := do
         failQueuedWrites connection error
         discard <| Http2.CancellationToken.cancel connection.writerFailureToken
           (reason := Std.CancellationReason.shutdown)
-
-private def startBackgroundTasks (connection : Connection)
-    (initialInbound : ByteArray := ByteArray.empty) : IO Unit := do
-  let pending? := if initialInbound.isEmpty then none else some initialInbound
-  let reader ← Async.toIO (readerLoop connection pending?)
-  connection.background.set { reader := some reader }
-  let writer ← Async.toIO (writerLoop connection)
-  connection.background.set { writer := some writer, reader := some reader }
 
 private def waitTaskWithin (task : AsyncTask α) (timeoutMs : Nat) : Async Bool := do
   let mut finished ← IO.hasFinished task
@@ -506,8 +469,8 @@ private def performShutdown (connection : Connection) : Async Unit := do
       joinBackgroundTasks connection
       session.close
   | none =>
-      shutdownSocket connection.socket
       joinBackgroundTasks connection
+      shutdownSocket connection.socket
 
 /-- Cooperatively close the connection and join its exact reader and writer. -/
 def close (connection : Connection) : Async Unit := do
@@ -517,6 +480,60 @@ def close (connection : Connection) : Async Unit := do
     try performShutdown connection finally connection.closed.resolve ()
   else
     discard <| Async.ofTask connection.closed.result?
+
+/-- Elect transport retirement without making the reader join itself. The
+spawned close owner drains the already-queued terminal frames, waits for this
+reader to return, and resolves the shared completion promise. -/
+private def requestTransportRetirement (connection : Connection) : IO Unit := do
+  discard <| Async.toIO (close connection)
+
+private def failAndRetire (connection : Connection) (error : Error) : IO Unit := do
+  failConnection connection error
+  requestTransportRetirement connection
+
+private partial def readerLoop (connection : Connection)
+    (pending? : Option ByteArray := none) : Async Unit := do
+  if let some chunk := pending? then
+    if ← processInboundChunk connection chunk then
+      readerLoop connection none
+    else
+      requestTransportRetirement connection
+    return
+  let event ← try Except.ok <$> nextReaderEvent connection
+    catch error => pure (Except.error error)
+  match event with
+  | .error error => failAndRetire connection (transportError error)
+  | .ok .stop =>
+      -- The close owner cancelled this token and already owns retirement.
+      failConnection connection (Error.connection .cancel "HTTP/2 connection closed locally")
+  | .ok (.writerFailed error) => failAndRetire connection (transportError error)
+  | .ok (.received none) =>
+      failAndRetire connection (Error.connection .internalError
+        "HTTP/2 connection closed by peer")
+  | .ok (.received (some raw)) =>
+      let plaintext? : Except IO.Error (Option ByteArray) ← try
+          match connection.tls with
+          | none => pure (Except.ok (some raw))
+          | some session => pure (Except.ok (← session.feedInbound raw))
+        catch error => pure (Except.error error)
+      match plaintext? with
+      | .error error => failAndRetire connection (transportError error)
+      | .ok none =>
+          failAndRetire connection (Error.connection .internalError
+            "TLS peer closed the HTTP/2 connection")
+      | .ok (some plaintext) =>
+          if ← processInboundChunk connection plaintext then
+            readerLoop connection none
+          else
+            requestTransportRetirement connection
+
+private def startBackgroundTasks (connection : Connection)
+    (initialInbound : ByteArray := ByteArray.empty) : IO Unit := do
+  let pending? := if initialInbound.isEmpty then none else some initialInbound
+  let reader ← Async.toIO (readerLoop connection pending?)
+  connection.background.set { reader := some reader }
+  let writer ← Async.toIO (writerLoop connection)
+  connection.background.set { writer := some writer, reader := some reader }
 
 def backgroundTasksFinished (connection : Connection) : IO Bool := do
   let tasks ← connection.background.get
@@ -536,14 +553,8 @@ private def localSettings (config : Config) : Http2.Connection.Settings := {
 }
 
 private def prefaceWire (config : Config) : IO ByteArray := do
-  let mut values := #[{ id := SettingId.enablePush, value := 0 }]
-  if config.initialWindowSize != Http2.Connection.initialWindowSize then
-    values := values.push { id := .initialWindowSize, value := config.initialWindowSize }
-  if let some limit := config.maxHeaderListSize then
-    values := values.push { id := .maxHeaderListSize, value := limit }
-  let settings ← requireOk (Settings.frame values)
-  let wire ← requireOk (Frame.encode settings)
-  pure (Http2.connectionPreface.append wire)
+  requireOk <| Http2.Connection.initialWireBytes
+    (Http2.Connection.initial .client (localSettings config))
 
 private def initializeConnection (socket : TCP.Socket.Client) (config : Config)
     (wire : ByteArray) (tls : Option Http2.Tls.ClientSession := none)

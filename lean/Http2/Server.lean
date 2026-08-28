@@ -288,21 +288,9 @@ private def settingsFor (config : Config) (applications : Applications) : Connec
 }
 
 private def initialSettings (config : Config) (applications : Applications) :
-    Except Error Frame := do
-  let mut values : Array Setting := #[]
-  if config.headerTableSize != Hpack.defaultDynamicTableSize then
-    values := values.push { id := .headerTableSize, value := config.headerTableSize }
-  if let some maximum := config.maxConcurrentStreams then
-    values := values.push { id := .maxConcurrentStreams, value := maximum }
-  if config.initialWindowSize != Connection.initialWindowSize then
-    values := values.push { id := .initialWindowSize, value := config.initialWindowSize }
-  if config.maxFrameSize != defaultMaxFramePayloadLength then
-    values := values.push { id := .maxFrameSize, value := config.maxFrameSize }
-  if let some maximum := config.maxHeaderListSize then
-    values := values.push { id := .maxHeaderListSize, value := maximum }
-  if applications.extendedConnect.isSome then
-    values := values.push { id := SettingId.enableConnectProtocol, value := 1 }
-  Http2.Settings.frame values
+    Except Error Frame :=
+  Connection.initialSettingsFrame
+    (Connection.initial .server (settingsFor config applications))
 
 private def newManagedState (config : Config) (applications : Applications) : ManagedState := {
   protocol := Connection.initial .server (settingsFor config applications)

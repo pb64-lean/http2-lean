@@ -202,6 +202,40 @@ def initial (role : Role) (localSettings : Settings := {}) : State := {
   prefaceReceived := role == .client
 }
 
+/-- Serialize the settings that this endpoint advertises at connection start.
+Settings used only as local implementation bounds are intentionally omitted.
+Servers never send `SETTINGS_ENABLE_PUSH`; clients explicitly disable push. -/
+def initialSettingsValues (state : State) : Array Setting := Id.run do
+  let settings := state.localSettings
+  let mut values : Array Setting := #[]
+  if settings.headerTableSize != Hpack.defaultDynamicTableSize then
+    values := values.push { id := .headerTableSize, value := settings.headerTableSize }
+  if state.role == .client then
+    values := values.push { id := .enablePush, value := if settings.enablePush then 1 else 0 }
+  if let some maximum := settings.maxConcurrentStreams then
+    values := values.push { id := .maxConcurrentStreams, value := maximum }
+  if settings.initialWindowSize != initialWindowSize then
+    values := values.push { id := .initialWindowSize, value := settings.initialWindowSize }
+  if settings.maxFrameSize != defaultMaxFramePayloadLength then
+    values := values.push { id := .maxFrameSize, value := settings.maxFrameSize }
+  if let some maximum := settings.maxHeaderListSize then
+    values := values.push { id := .maxHeaderListSize, value := maximum }
+  if settings.enableConnectProtocol then
+    values := values.push { id := .enableConnectProtocol, value := 1 }
+  return values
+
+/-- Construct the initial SETTINGS frame from the same state that will enforce
+the advertised values. -/
+def initialSettingsFrame (state : State) : Except Error Frame :=
+  Http2.Settings.frame (initialSettingsValues state)
+
+/-- Encode an endpoint's connection-opening bytes. Clients prepend the HTTP/2
+connection preface; servers send only their initial SETTINGS frame. -/
+def initialWireBytes (state : State) : Except Error ByteArray := do
+  let frame ← initialSettingsFrame state
+  let wire ← Frame.encode frame
+  pure <| if state.role == .client then connectionPreface.append wire else wire
+
 /-- Look up retained protocol state for one stream identifier. -/
 def stream? (state : State) (streamId : Nat) : Option Stream :=
   state.streams.find? (·.id == streamId)

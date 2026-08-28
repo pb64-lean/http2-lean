@@ -76,6 +76,16 @@ partial def awaitNoManagedTunnels (server : Server.Server) (remainingMs : Nat :=
     IO.sleep 1
     awaitNoManagedTunnels server (remainingMs - 1)
 
+partial def awaitBackgroundRetirement (connection : Client.Connection)
+    (remainingMs : Nat := 2000) : IO Bool := do
+  if ← Client.backgroundTasksFinished connection then
+    pure true
+  else if remainingMs == 0 then
+    pure false
+  else
+    IO.sleep 1
+    awaitBackgroundRetirement connection (remainingMs - 1)
+
 def request (path : String := "/echo") : ExtendedConnect.Request := {
   protocol := "websocket"
   scheme := "http"
@@ -135,6 +145,19 @@ def testCapabilityDisabled : IO Unit := do
   finally
     Server.shutdown server
     Server.wait server (some 3000)
+
+def testPeerClosureRetiresClient : IO Unit := do
+  let server ← Server.serveApplications {} { address := Server.loopback 0 }
+  let connection ← Client.connect {
+    address := Server.loopback (portOf server.localAddress)
+    authority := "localhost"
+  }
+  Server.shutdown server
+  Server.wait server (some 3000)
+  expect (← awaitBackgroundRetirement connection)
+    "peer closure left the HTTP/2 client writer or reader running"
+  -- A later explicit close observes the same completed retirement election.
+  Async.block (Client.close connection)
 
 def testRuntime : IO Unit := do
   let openingEntered ← IO.Promise.new
@@ -237,6 +260,7 @@ def testRuntime : IO Unit := do
 
 def run : IO Unit := do
   testCapabilityDisabled
+  testPeerClosureRetiresClient
   testRuntime
   IO.println "HTTP/2 client extended CONNECT tests passed"
 
