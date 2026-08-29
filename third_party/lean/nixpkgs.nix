@@ -1,0 +1,75 @@
+{ config ? {}, overlays ? [], ... }@args:
+
+let
+  spec = builtins.fromJSON (builtins.readFile ./nixpkgs.json);
+  nixpkgs = fetchTarball {
+    url = "https://github.com/${spec.owner}/${spec.repo}/archive/${spec.rev}.tar.gz";
+    sha256 = spec.sha256;
+  };
+
+  # Building Lean and Std from one pinned revision in one derivation
+  # preserves .olean ABI compatibility.
+  leanUpstreamStdRev = "68218e876d2a38b1985b8590fff244a83c321783";
+  leanUpstreamStdSrcSha256 = "1vc4m817iws84c6lzrfa9wrahhv060w4ik32h2hcpj68rywhk7ms";
+
+  leanUpstreamStdOverlay = final: prev:
+    let
+      leantarVersion = "0.1.19";
+      leantarPlatform =
+        {
+          x86_64-linux = {
+            target = "x86_64-unknown-linux-musl";
+            sha256 = "0fx1i9nn25hm65nhiiwq087qrc0pyhskdj09yyhcqmk5mhsfkkhk";
+          };
+          aarch64-linux = {
+            target = "aarch64-unknown-linux-musl";
+            sha256 = "0kg9ckm870h232s94m4721r3ch82kranba14xyyrai191l9agxrw";
+          };
+          x86_64-darwin = {
+            target = "x86_64-apple-darwin";
+            sha256 = "0m8dwj8viqmvxrkl0595s5h1njhkmh7g4bgfgw4r5zqms3x419k3";
+          };
+          aarch64-darwin = {
+            target = "aarch64-apple-darwin";
+            sha256 = "08bffz3yy6mjyhc7l4503cq6ri3lwsgvpq8y8y5rl8k035gnnc5l";
+          };
+        }.${prev.stdenv.hostPlatform.system}
+          or (throw "Unsupported leantar platform: ${prev.stdenv.hostPlatform.system}");
+      leantar = prev.runCommand "leantar-${leantarVersion}" {
+        src = prev.fetchzip {
+          url = "https://github.com/digama0/leangz/releases/download/v${leantarVersion}/leantar-v${leantarVersion}-${leantarPlatform.target}.tar.gz";
+          inherit (leantarPlatform) sha256;
+        };
+      } ''
+        install -Dm755 "$src/leantar" "$out/bin/leantar"
+      '';
+    in {
+      lean4_upstream_std = prev.lean4.overrideAttrs (old: rec {
+        version = "4.31.0";
+        src = prev.fetchFromGitHub {
+          owner = "leanprover";
+          repo = "lean4";
+          rev = leanUpstreamStdRev;
+          sha256 = leanUpstreamStdSrcSha256;
+        };
+
+        postPatch = "substituteInPlace src/CMakeLists.txt --replace-fail 'set(GIT_SHA1 \"\")' 'set(GIT_SHA1 \"${src.rev}\")'\nrm -rf src/lake/examples/git/\n";
+
+        nativeBuildInputs =
+          old.nativeBuildInputs
+          ++ [ prev.pkg-config leantar ]
+          ++ prev.lib.optionals prev.stdenv.isDarwin [ prev.darwin.cctools ];
+
+        buildInputs = old.buildInputs ++ [ prev.libuv prev.cadical ];
+
+        cmakeFlags = old.cmakeFlags ++ [
+          "-DUSE_MIMALLOC=OFF"
+          "-DLEANTAR=${leantar}/bin/leantar"
+        ];
+      });
+    };
+in
+import nixpkgs (args // {
+  inherit config;
+  overlays = overlays ++ [ leanUpstreamStdOverlay ];
+})
