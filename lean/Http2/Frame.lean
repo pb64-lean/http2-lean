@@ -657,7 +657,7 @@ theorem ofUInt8_toUInt8_unknown {value : UInt8} (h : 10 ≤ value.toNat) :
       ofUInt8 (UInt8.ofNat i.val) = .unknown (UInt8.ofNat i.val) := by
     set_option maxRecDepth 4096 in decide
   have := hall ⟨value.toNat, value.toNat_lt⟩ h
-  simpa [UInt8.ofNat_toNat] using this
+  simpa [UInt8.ofNat_toNat, FrameType.toUInt8] using this
 
 end FrameType
 

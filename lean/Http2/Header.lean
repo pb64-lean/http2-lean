@@ -216,8 +216,8 @@ private def getLastUSizeLoop (headers : Headers) (key : String)
         exact USize.toNat_inj.mp (by simpa using zero)
       omega
     have oneLe : (1 : USize) ≤ i := by
-      rw [USize.le_iff_toNat_le]
-      simpa using positive
+      rw [USize.le_iff_toNat_le, USize.toNat_one]
+      omega
     let previous := i - 1
     have previousToNat : previous.toNat = i.toNat - 1 := by
       simpa [previous] using USize.toNat_sub_of_le i 1 oneLe
